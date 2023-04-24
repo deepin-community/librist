@@ -1,0 +1,28 @@
+.TH RISTSRPPASSWD "1" "March 2022" "ristsrppasswd 0.2.6" "User Commands"
+.SH NAME
+ristsrppasswd \- generate passwords for authenticating RIST streams
+.SH SYNOPSIS
+.B ristsrppasswd
+[\fI\,username\/\fR] [\fI\,password\/\fR]
+.SH DESCRIPTION
+Reliable Internet Stream Transport (RIST) is a transport protocol
+designed for reliable transmission of video over lossy networks
+(including the Internet) with low latency and high quality.
+.P
+ristsrppasswd generates an SHA256 password hash to be used for
+authenticating RIST streams.
+.SH OPTIONS
+.TP
+\fBusername\fR
+The name of the authenticating user
+.TP
+\fBpassword\fR
+The plaintext password for the authenticating user
+.SH SEE ALSO
+.BR ristsender (1),
+.BR ristreceiver (1),
+.BR https://code.videolan.org/rist/librist/-/wikis/LibRIST%20Documentation
+.SH AUTHOR
+.PP
+This manual page was written by Florian Ernst <florian@debian.org>,
+for the Debian project (and may be used by others).

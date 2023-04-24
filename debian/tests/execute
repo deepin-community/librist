@@ -1,0 +1,74 @@
+#!/bin/sh
+
+set -e
+
+SAMPLE='/usr/share/forensics-samples/original-files/movie2/movie-hello.mp4'
+IP='127.0.0.1'
+PORT_SENDER='6789'
+PORT_RIST='19876'
+PORT_RECEIVER='9876'
+BANDWIDTH='2560000'
+PASSPHRASE='SecretPassPhrase'
+SLEEPTIME='5'
+
+WORKDIR="$(mktemp -d)"
+trap "rm -rf $WORKDIR" 0 INT QUIT ABRT PIPE TERM
+cd "$WORKDIR"
+
+# based on https://code.videolan.org/rist/librist/-/wikis/rist-sender-and-receiver-Command-Line-Examples-as-of-v.-0.2.0
+# testing the following flow, with ffmpeg providing and - at the end - receiving the stream:
+#
+# FFMPEGSENDER        RISTSENDER           RISTRECEIVER        FFMPEGRECEIVER
+# +----------+      +------------+       +--------------+      +------------+
+# |          | UDP  |            | RIST  |              | UDP  |            |
+# |  ffmpeg  +----->| ristsender +------>| ristreceiver +----->|   ffmpeg   |
+# |          |      |            |       |              |      |            |
+# +----------+      +------------+       +--------------+      +------------+
+
+case "$1" in
+'psk_enc')
+    RIST_EXTRAOPTS="&congestion-control=1&aes-type=128&secret=$PASSPHRASE"
+    RIST_PROFILE='1' # Main
+    ;;
+'simple')
+    RIST_EXTRAOPTS=''
+    RIST_PROFILE='0' # Simple
+    ;;
+*)
+    echo 'Unknown test profile, exiting.'
+    exit 1
+    ;;
+esac
+
+# listen for an incoming UDP stream to copy (w/ overwrite) to a file; close stdin to allow ffmpeg to run in the background
+ffmpeg -y -i "udp://$IP:$PORT_RECEIVER" -c copy file://$(pwd)/sample.mp4 > FFMPEGRECEIVER.log 2>&1 < /dev/null &
+FFMPEGRECEIVER=$!
+
+# let ristreceiver receive an incoming RIST stream and relay to UDP above
+ristreceiver -i "rist://@$IP:$PORT_RIST?cname=RECEIVER01&bandwidth=$BANDWIDTH$RIST_EXTRAOPTS" -o "udp://$IP:$PORT_RECEIVER" -p "$RIST_PROFILE" -v 4 > RISTRECEIVER.log 2>&1 &
+RISTRECEIVER=$!
+
+# let ristsender relay the UDP stream via RIST above
+ristsender -i "udp://@$IP:$PORT_SENDER" -o "rist://$IP:$PORT_RIST?cname=SENDER01&bandwidth=$BANDWIDTH$RIST_EXTRAOPTS" -p "$RIST_PROFILE" -v 4 > RISTSENDER.log 2>&1 &
+RISTSENDER=$!
+
+# grant the preceding commands some time to safely initialize
+sleep "$SLEEPTIME"
+
+# send sample file into UDP stream
+ffmpeg -i "$SAMPLE" -f mpegts "udp://$IP:$PORT_SENDER" > FFMPEGSENDER.log 2>&1
+
+# grant the receivers some time to finish before killing them
+sleep "$SLEEPTIME"
+kill -KILL $RISTSENDER $RISTRECEIVER $FFMPEGRECEIVER
+
+# did we actually receive a video? streaming it will change it, so we cannot just compare the files ...
+file --mime sample.mp4 | grep '^sample.mp4: video/mp4' && echo "OK: found a streamed video:"
+ls -al "$SAMPLE" sample.mp4
+
+# output logs for reference
+for i in FFMPEGSENDER RISTSENDER RISTRECEIVER FFMPEGRECEIVER; do
+    echo "===== $i logs ====="
+    cat "$i.log"
+    echo
+done

@@ -1,0 +1,68 @@
+.TH RISTRECEIVER "1" "March 2022" "ristreceiver 0.2.6" "User Commands"
+.SH NAME
+ristreceiver \- receive a stream via RIST
+.SH SYNOPSIS
+.B ristreceiver
+[\fI\,OPTIONS\/\fR]
+.SH DESCRIPTION
+Reliable Internet Stream Transport (RIST) is a transport protocol
+designed for reliable transmission of video over lossy networks
+(including the Internet) with low latency and high quality.
+.P
+ristreceiver receives a RIST stream and relays the contents to an
+UDP or RTP stream.
+.SH OPTIONS
+.TP
+\fB\-i\fR | \fB\-\-inputurl\fR rist://...
+\fBMandatory Option:\fR Comma separated list of input rist URLs
+.TP
+\fB\-o\fR | \fB\-\-outputurl\fR udp://... or rtp://...
+\fBMandatory Option:\fR Comma separated list of output udp or rtp URLs
+.TP
+\fB\-b\fR | \fB\-\-buffer\fR value
+Default buffer size for packet retransmissions
+.TP
+\fB\-s\fR | \fB\-\-secret\fR PWD
+Default pre\-shared encryption secret
+.TP
+\fB\-e\fR | \fB\-\-encryption\-type\fR TYPE
+Default Encryption type (0, 128 = AES\-128, 256 = AES\-256)|
+.TP
+\fB\-p\fR | \fB\-\-profile\fR number
+Rist profile (0 = simple, 1 = main, 2 = advanced)
+.TP
+\fB\-S\fR | \fB\-\-statsinterval\fR value (ms)
+Interval at which stats get printed, 0 to disable
+.TP
+\fB\-v\fR | \fB\-\-verbose\-level\fR value
+To disable logging: \fB\-1\fR, log levels match syslog levels
+.TP
+\fB\-r\fR | \fB\-\-remote\-logging\fR IP:PORT
+Send logs and stats to this IP:PORT using udp messages
+.TP
+\fB\-F\fR | \fB\-\-srpfile\fR filepath
+When in listening mode, use this file to hold the list
+of usernames and passwords to validate against. Use the
+\fBristsrppasswd\fR tool to create the line entries.
+.TP
+\fB\-h\fR | \fB\-\-help\fR
+Show this help
+.TP
+\fB\-u\fR | \fB\-\-help\-url\fR
+Show all the possible url options
+.PP
+Default values:
+.TP
+\fB\-\-profile\fR 1
+.TP
+\fB\-\-statsinterval\fR 1000
+.HP
+\fB\-\-verbose\-level\fR 6
+.SH SEE ALSO
+.BR ristsender (1),
+.BR ristsrppasswd (1),
+.BR https://code.videolan.org/rist/librist/-/wikis/LibRIST%20Documentation
+.SH AUTHOR
+.PP
+This manual page was written by Florian Ernst <florian@debian.org>,
+for the Debian project (and may be used by others).

@@ -1,0 +1,63 @@
+.TH RIST2RIST "1" "March 2022" "rist2rist 0.2.6" "User Commands"
+.SH NAME
+rist2rist \- tunnel a RIST connection between two URIs
+.SH SYNOPSIS
+.B rist2rist
+[\fI\,OPTIONS\/\fR]
+.SH DESCRIPTION
+Reliable Internet Stream Transport (RIST) is a transport protocol
+designed for reliable transmission of video over lossy networks
+(including the Internet) with low latency and high quality.
+.P
+rist2rist allows one to tunnel a RIST stream between two URIs.
+.SH OPTIONS
+.TP
+\fB\-i\fR | \fB\-\-inputurl\fR ADDRESS:PORT
+\fBMandatory Option:\fR Input IP address and port
+.TP
+\fB\-o\fR | \fB\-\-outputurl\fR ADDRESS:PORT
+\fBMandatory Option:\fR Output IP address and port
+.TP
+\fB\-s\fR | \fB\-\-secret\fR PWD
+Pre\-shared encryption secret
+.TP
+\fB\-e\fR | \fB\-\-encryption\-type\fR TYPE
+Encryption type (0 = none, 1 = AES\-128, 2 = AES\-256)
+.TP
+\fB\-S\fR | \fB\-\-statsinterval\fR value (ms)
+Interval at which stats get printed, 0 to disable
+.TP
+\fB\-N\fR | \fB\-\-cname\fR identifier
+Manually configured identifier
+.TP
+\fB\-v\fR | \fB\-\-verbose\-level\fR value
+To disable logging: \fB\-1\fR, log levels match syslog levels
+.TP
+\fB\-r\fR | \fB\-\-remote\-logging\fR IP:PORT
+Send logs and stats to this IP:PORT using udp messages
+.TP
+\fB\-F\fR | \fB\-\-srpfile\fR filepath
+When in listening mode, use this file to hold the list
+of usernames and passwords to validate against. Use the
+\fBristsrppasswd\fR tool to create the line entries.
+.TP
+\fB\-h\fR | \fB\-\-help\fR
+Show this help
+.TP
+\fB\-u\fR | \fB\-\-help\-url\fR
+Show all the possible url options
+.PP
+Default values:
+.TP
+\fB\-\-statsinterval\fR 1000
+.HP
+\fB\-\-verbose\-level\fR 6
+.SH SEE ALSO
+.BR ristsender (1),
+.BR ristreceiver (1),
+.BR ristsrppasswd (1),
+.BR https://code.videolan.org/rist/librist/-/wikis/LibRIST%20Documentation
+.SH AUTHOR
+.PP
+This manual page was written by Florian Ernst <florian@debian.org>,
+for the Debian project (and may be used by others).

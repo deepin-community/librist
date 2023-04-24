@@ -1,0 +1,19 @@
+Tests: pkg-config
+Depends:
+ build-essential,
+ pkg-config,
+ librist-dev
+
+Test-Command: debian/tests/execute simple
+Depends:
+ rist-tools,
+ ffmpeg,
+ forensics-samples-files,
+ file
+
+Test-Command: debian/tests/execute psk_enc
+Depends:
+ rist-tools,
+ ffmpeg,
+ forensics-samples-files,
+ file
