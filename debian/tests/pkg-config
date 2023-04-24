@@ -1,0 +1,31 @@
+#!/bin/sh
+
+set -e
+
+if [ -n "${DEB_HOST_GNU_TYPE:-}" ]; then
+    CROSS_COMPILE=${DEB_HOST_GNU_TYPE}-
+else
+    CROSS_COMPILE=
+fi
+
+WORKDIR="$(mktemp -d)"
+trap "rm -rf $WORKDIR" 0 INT QUIT ABRT PIPE TERM
+cd "$WORKDIR"
+
+cat <<.EOF > pkgconfigtest.c
+#include <librist/librist.h>
+#include <stdio.h>
+
+int main()
+{
+    printf("libRIST version:     %s \n", librist_version());
+    printf("libRIST API version: %s \n", librist_api_version());
+    return 0;
+}
+.EOF
+
+${CROSS_COMPILE}gcc -pedantic -Wall -Werror -o pkgconfigtest pkgconfigtest.c $(pkg-config --cflags --libs librist)
+echo "build: OK"
+[ -x pkgconfigtest ]
+./pkgconfigtest
+echo "run: OK"

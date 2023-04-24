@@ -1,4 +1,11 @@
 #!/usr/bin/make -f
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
 %:
 	dh $@
+
+override_dh_auto_test-arch:
+	# must be executed consecutively lest they interfer with each other!
+	# and grant the tests more time which is sorely needed with noisy neighbors
+	dh_auto_test --no-parallel -- --timeout-multiplier 5

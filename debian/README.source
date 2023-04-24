@@ -1,0 +1,11 @@
+librist for Debian
+------------------
+
+The sources have been repacked to exclude non-DFSG-free documentation files
+which by themselves were free to be used but which had no preferred form of
+modification available. In addition embedded code copies have been removed.
+
+The repackaging is done automagically using debian/copyright's Files-Excluded
+in combination with debian/watch and uscan.
+
+ -- Florian Ernst <florian@debian.org>  Mon, 14 Mar 2022 21:51:16 +0100

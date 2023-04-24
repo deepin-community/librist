@@ -1,0 +1,3 @@
+# these manpages have been pregenerated based on help2man output
+# as they need quite some fixing (embedded timestamps and formatting)
+debian/manpages/*.1
