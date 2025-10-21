@@ -1,3 +1,87 @@
+librist (0.2.11+dfsg-1) unstable; urgency=medium
+
+  * Uploading to unstable now that the mbedtls transition has finished
+
+ -- Florian Ernst <florian@debian.org>  Sat, 23 Nov 2024 10:33:55 +0100
+
+librist (0.2.11+dfsg-1~exp1) experimental; urgency=medium
+
+  * Uploading to experimental only due to the ongoing mbedtls transition
+  * [9960b1b] d/watch: update to work with new upstream GitLab version
+  * [ee5544e] d/copyright: clarify one file to be dual-licensed
+  * [3f58362] New upstream version 0.2.11+dfsg
+  * [27c856c] d/patches/: refresh for new upstream release
+  * [c0f4dcd] d/copyright: update years
+  * [3ef95ab] d/control: Standards-Version: 4.7.0 (no further changes
+    required)
+  * [88d3b45] d/librist4.symbols: update for new upstream release
+
+ -- Florian Ernst <florian@debian.org>  Fri, 22 Nov 2024 14:54:21 +0100
+
+librist (0.2.10+dfsg-2) unstable; urgency=medium
+
+  * [f2bcea7] debian/control: librist-dev needs to Depend on libmbedtls-dev
+    now, thanks to Gianfranco Costamagna <locutusofborg@debian.org>
+    (Closes: #1068450)
+  * [917525b] debian/control: pkg-config has been superseded by pkgconf
+
+ -- Florian Ernst <florian@debian.org>  Sun, 07 Apr 2024 11:30:06 +0200
+
+librist (0.2.10+dfsg-1) unstable; urgency=medium
+
+  * [f5d9014] New upstream version 0.2.10+dfsg
+  * [9317c61] debian/copyright: update covering new upstream contents
+
+ -- Florian Ernst <florian@debian.org>  Fri, 03 Nov 2023 08:34:35 +0100
+
+librist (0.2.9+dfsg-2) unstable; urgency=medium
+
+  * [e79b9dc] debian/control: librist-dev requires libcjson-dev now, so add
+    Depends (Closes: 1054165)
+
+ -- Florian Ernst <florian@debian.org>  Wed, 18 Oct 2023 17:07:29 +0200
+
+librist (0.2.9+dfsg-1) unstable; urgency=medium
+
+  * [fa86326] New upstream version 0.2.9+dfsg
+
+ -- Florian Ernst <florian@debian.org>  Sat, 14 Oct 2023 11:00:41 +0200
+
+librist (0.2.9~pre+git20231005+dfsg-1) experimental; urgency=medium
+
+  * [88c36b4] New upstream version 0.2.9~pre+git20231005+dfsg
+    - git snapshot to test 32bit builds, cf.
+      https://code.videolan.org/rist/librist/-/issues/169
+  * [36d7ed5] debian/librist4.symbols: update to match new upstream release
+  * [2071e64] debian/copyright: update to match new upstream release
+
+ -- Florian Ernst <florian@debian.org>  Thu, 05 Oct 2023 19:15:49 +0200
+
+librist (0.2.8+dfsg+really0.2.7+dfsg-1) unstable; urgency=medium
+
+  * [b92bc1e] New upstream version 0.2.8+dfsg+really0.2.7+dfsg
+    - well, going back to 0.2.7 for the time being as 0.2.8 is not 32bit safe,
+      cf. https://code.videolan.org/rist/librist/-/issues/169
+      (Closes: #1051454)
+  * [daf0dab] Revert "debian/librist4.symbols: update to match new upstream
+    release"
+  * [279bfff] Revert "debian/copyright: update to match new upstream release"
+
+ -- Florian Ernst <florian@debian.org>  Thu, 21 Sep 2023 21:06:00 +0200
+
+librist (0.2.8+dfsg-1) unstable; urgency=medium
+
+  * [47c0103] New upstream version 0.2.8+dfsg
+  * [090f44e] debian/copyright: update to match new upstream release
+  * [7956554] debian/librist4.symbols: update to match new upstream release
+  * [ca2777d] debian/control: add libmicrohttpd-dev to B-D
+    allowing rist-tools to serve Prometheus metrics via HTTP
+  * [6feed59] debian/tests/control: add an explicit D: libcjson-dev for
+    compatibility
+  * [f38e447] debian/control: Standards-Version: 4.6.2 (no changes required)
+
+ -- Florian Ernst <florian@debian.org>  Thu, 07 Sep 2023 14:55:18 +0200
+
 librist (0.2.7+dfsg-1) unstable; urgency=medium
 
   * [8324dcd] New upstream version 0.2.7+dfsg

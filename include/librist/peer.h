@@ -26,10 +26,12 @@ struct rist_peer;
 #define RIST_DEFAULT_RECOVERY_MODE RIST_RECOVERY_MODE_TIME
 #define RIST_DEFAULT_RECOVERY_MAXBITRATE (100000)
 #define RIST_DEFAULT_RECOVERY_MAXBITRATE_RETURN (0)
-#define RIST_DEFAULT_RECOVERY_LENGHT_MIN (1000)
-#define RIST_DEFAULT_RECOVERY_LENGHT_MAX (1000)
-#define RIST_DEFAULT_RECOVERY_REORDER_BUFFER (25)
-#define RIST_DEFAULT_RECOVERY_RTT_MIN (50)
+#define RIST_DEFAULT_RECOVERY_LENGTH_MIN (1000)
+#define RIST_DEFAULT_RECOVERY_LENGHT_MIN _Pragma ("GCC warning \"'RIST_DEFAULT_RECOVERY_LENGHT_MIN' is deprecated, use RIST_DEFAULT_RECOVERY_LENGTH_MIN\"")  RIST_DEFAULT_RECOVERY_LENGTH_MIN
+#define RIST_DEFAULT_RECOVERY_LENGTH_MAX (1000)
+#define RIST_DEFAULT_RECOVERY_LENGHT_MAX _Pragma ("GCC warning \"'RIST_DEFAULT_RECOVERY_LENGHT_MAX' is deprecated, use RIST_DEFAULT_RECOVERY_LENGTH_MAX\"")  RIST_DEFAULT_RECOVERY_LENGTH_MAX
+#define RIST_DEFAULT_RECOVERY_REORDER_BUFFER (15)
+#define RIST_DEFAULT_RECOVERY_RTT_MIN (5)
 #define RIST_DEFAULT_RECOVERY_RTT_MAX (500)
 #define RIST_DEFAULT_CONGESTION_CONTROL_MODE RIST_CONGESTION_CONTROL_MODE_NORMAL
 #define RIST_DEFAULT_MIN_RETRIES (6)
@@ -113,7 +115,7 @@ struct rist_peer_config
 	/* Connection options */
 	uint32_t session_timeout;
 	uint32_t keepalive_interval;
-	uint32_t timing_mode;
+	enum rist_timing_mode timing_mode;
 	char srp_username[RIST_MAX_STRING_LONG];
 	char srp_password[RIST_MAX_STRING_LONG];
 };
@@ -175,13 +177,15 @@ RIST_API int rist_peer_destroy(struct rist_ctx *ctx,
 
 /**
  * @brief Set the weight of a given peer.
- * 
+ *
  * @param ctx RIST context
  * @param peer The peer to set the weight for
  * @param weight The weight to assign to the peer
  * @return 0 on success, -1 in case of error.
  */
 RIST_API int rist_peer_weight_set(struct rist_ctx *ctx, struct rist_peer *peer, const uint32_t weight);
+
+RIST_API int rist_peer_get_socket(struct rist_peer *peer, int *socket, int *socket_extra);
 
 enum rist_connection_status
 {
@@ -233,6 +237,24 @@ RIST_API int rist_auth_handler_set(struct rist_ctx *ctx,
 		rist_auth_handler_disconnect_cb disconnect_cb,
 		void *arg);
 
+
+RIST_API uint32_t rist_peer_get_id(const struct rist_peer *peer);
+
+/**
+ * @brief Retrieve the cname associated to a peer (if any)
+ *
+ * @param peer The peer to extract the cname from
+ * @param[out] cname a pointer to the string containing the cname
+ * @return the length of the cname string
+ */
+RIST_API uint32_t rist_peer_get_cname(const struct rist_peer *peer, const char **cname);
+
+#if HAVE_SRP_SUPPORT
+/*
+	@brief Update the shared passphrase for the peer
+*/
+RIST_API int rist_peer_update_secret(struct rist_peer *peer, const char* password);
+#endif
 #ifdef __cplusplus
 }
 #endif

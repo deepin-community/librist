@@ -6,13 +6,18 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include "logging.h"
+#include "proto/gre.h"
+#include "proto/protocol_gre.h"
 #include "udp-private.h"
 #include "rist-private.h"
 #include "log-private.h"
 #include "socket-shim.h"
 #include "endian-shim.h"
-#if HAVE_MBEDTLS
-#include "eap.h"
+#include "proto/rist_time.h"
+#include "proto/protocol_rtp.h"
+#if HAVE_SRP_SUPPORT
+#include "proto/eap.h"
 #endif
 #include "crypto/psk.h"
 #include "mpegts.h"
@@ -22,98 +27,6 @@
 #include <stdint.h>
 #include <assert.h>
 #include <fcntl.h>
-
-uint64_t timestampNTP_u64(void)
-{
-
-	// We use clock_gettime instead of gettimeofday even though we only need microseconds
-	// because gettimeofday implementation under linux is dependent on the kernel clock
-	// and can produce duplicate times (too close to kernel timer)
-
-	// We use the NTP time standard: rfc5905 (https://tools.ietf.org/html/rfc5905#section-6)
-	// The 64-bit timestamps used by NTP consist of a 32-bit part for seconds
-	// and a 32-bit part for fractional second, giving a time scale that rolls
-	// over every 232 seconds (136 years) and a theoretical resolution of
-	// 2−32 seconds (233 picoseconds). NTP uses an epoch of January 1, 1900.
-	// Therefore, the first rollover occurs on February 7, 2036.
-	timespec_t ts;
-#if defined (__APPLE__)
-	clock_gettime_osx(CLOCK_MONOTONIC_OSX, &ts);
-#else
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-#endif
-	// Convert nanoseconds to 32-bits fraction (232 picosecond units)
-	uint64_t t = (uint64_t)(ts.tv_nsec) << 32;
-	t /= 1000000000;
-	// There is 70 years (incl. 17 leap ones) offset to the Unix Epoch.
-	// No leap seconds during that period since they were not invented yet.
-	t |= (uint64_t)((70LL * 365 + 17) * 24 * 60 * 60 + ts.tv_sec) << 32;
-	return t; // nanoseconds (technically, 232.831 picosecond units)
-}
-
-uint64_t timestampNTP_RTC_u64(void) {
-	timespec_t ts;
-#if defined (__APPLE__)
-	clock_gettime_osx(CLOCK_REALTIME_OSX, &ts);
-#else
-	clock_gettime(CLOCK_REALTIME, &ts);
-#endif
-	// Convert nanoseconds to 32-bits fraction (232 picosecond units)
-	uint64_t t = (uint64_t)(ts.tv_nsec) << 32;
-	t /= 1000000000;
-	// There is 70 years (incl. 17 leap ones) offset to the Unix Epoch.
-	// No leap seconds during that period since they were not invented yet.
-	t |= (uint64_t)((70LL * 365 + 17) * 24 * 60 * 60 + ts.tv_sec) << 32;
-	return t;
-}
-
-uint32_t timestampRTP_u32( int advanced, uint64_t i_ntp )
-{
-	if (!advanced) {
-		i_ntp *= RTP_PTYPE_MPEGTS_CLOCKHZ;
-		i_ntp = i_ntp >> 32;
-		return (uint32_t)i_ntp;
-	}
-	else
-	{
-		// We just need the middle 32 bits, i.e. 65536Hz clock
-		i_ntp = i_ntp >> 16;
-		return (uint32_t)i_ntp;
-	}
-}
-
-uint64_t convertRTPtoNTP(uint8_t ptype, uint32_t time_extension, uint32_t i_rtp)
-{
-	uint64_t i_ntp;
-	if (ptype == RTP_PTYPE_RIST) {
-		// Convert rtp to 64 bit and shift it 16 bits
-		uint64_t part2 = (uint64_t)i_rtp;
-		part2 = part2 << 16;
-		// rebuild source_time (lower and upper 16 bits)
-		uint64_t part3 = (uint64_t)(time_extension & 0xffff);
-		uint64_t part1 = ((uint64_t)(time_extension & 0xffff0000)) << 32;
-		i_ntp = part1 | part2 | part3;
-		//fprintf(stderr,"source time %"PRIu64", rtp time %"PRIu32"\n", source_time, rtp_time);
-	} else {
-		int32_t clock = get_rtp_ts_clock(ptype);
-		if (RIST_UNLIKELY(!clock)){
-				clock = RTP_PTYPE_MPEGTS_CLOCKHZ;
-				// Insert a new timestamp (not ideal but better than failing)
-				i_rtp = htobe32(timestampRTP_u32(0, timestampNTP_u64()));
-		}
-		i_ntp = (uint64_t)i_rtp << 32;
-		i_ntp /= clock;
-	}
-	return i_ntp;
-}
-
-uint64_t calculate_rtt_delay(uint64_t request, uint64_t response, uint32_t delay) {
-	/* both request and response are NTP timestamps, delay is in microseconds */
-	uint64_t rtt = response - request;
-	if (RIST_UNLIKELY(delay))
-		rtt -= (((uint64_t)delay) << 32)/1000000;
-	return rtt;
-}
 
 void rist_clean_sender_enqueue(struct rist_sender *ctx)
 {
@@ -165,56 +78,22 @@ void rist_clean_sender_enqueue(struct rist_sender *ctx)
 size_t rist_send_seq_rtcp(struct rist_peer *p, uint16_t seq_rtp, uint8_t payload_type, uint8_t *payload, size_t payload_len, uint64_t source_time, uint16_t src_port, uint16_t dst_port, bool retry)
 {
 	struct rist_common_ctx *ctx = get_cctx(p);
-	struct rist_key *k = &p->key_tx;
 	uint8_t *data;
-	size_t len, gre_len;
+	size_t len;
 	size_t hdr_len = 0;
 	ssize_t ret = 0;
-	uint32_t seq = p->seq++;
-	/* Our encryption and compression operations directly modify the payload buffer we receive as a pointer
-	   so we create a local pointer that points to the payload pointer, if we would either encrypt or compress we instead
-	   malloc and mempcy, to ensure our source stays clean. We only do this with RAW data as these buffers are the only
-	   assumed to be reused by retransmits */
+
 	uint8_t *_payload = NULL;
-
-	bool modifyingbuffer = (ctx->profile > RIST_PROFILE_SIMPLE
-							&& (payload_type == RIST_PAYLOAD_TYPE_DATA_RAW || payload_type == RIST_PAYLOAD_TYPE_DATA_RAW_RTP_EXT)
-							&& (k->key_size || p->compression));
-
-	assert(payload != NULL);
-
-	if (modifyingbuffer) {
-		_payload = malloc(payload_len + RIST_MAX_PAYLOAD_OFFSET);
-		_payload  = _payload + RIST_MAX_PAYLOAD_OFFSET;
-		memcpy(_payload, payload, payload_len);
-	} else {
-		_payload = payload;
-	}
-
-	//if (p->receiver_mode)
-	//	rist_log_priv(&ctx->common, RIST_LOG_ERROR, "Sending seq %"PRIu32" and rtp_seq %"PRIu16" payload is %d\n",
-	//		seq, seq_rtp, payload_type);
-	//else
-	//	rist_log_priv(&ctx->common, RIST_LOG_ERROR, "Sending seq %"PRIu32" and idx is %zu/%zu/%zu (read/write/delete) and payload is %d\n",
-	//		seq, p->sender_ctx->sender_queue_read_index,
-	//		p->sender_ctx->sender_queue_write_index,
-	//		p->sender_ctx->sender_queue_delete_index,
-	//		payload_type);
+	_payload = payload;
 
 	// TODO: write directly on the payload to make it faster
 	uint8_t header_buf[RIST_MAX_HEADER_SIZE] = {0};
-	if (k->key_size) {
-		gre_len = sizeof(struct rist_gre_key_seq_real);
-	} else {
-		gre_len = sizeof(struct rist_gre_hdr);
-	}
-
 	uint16_t proto_type;
 	if (RIST_UNLIKELY(payload_type == RIST_PAYLOAD_TYPE_DATA_OOB)) {
 		proto_type = RIST_GRE_PROTOCOL_TYPE_FULL;
 	} else {
 		proto_type = RIST_GRE_PROTOCOL_TYPE_REDUCED;
-		struct rist_protocol_hdr *hdr = (void *) (header_buf + gre_len);
+		struct rist_protocol_hdr *hdr = (void *) (header_buf);
 		hdr->src_port = htobe16(src_port);
 		hdr->dst_port = htobe16(dst_port);
 		if (payload_type == RIST_PAYLOAD_TYPE_RTCP || payload_type == RIST_PAYLOAD_TYPE_RTCP_NACK)
@@ -234,7 +113,7 @@ size_t rist_send_seq_rtcp(struct rist_peer *p, uint16_t seq_rtp, uint8_t payload
 			{
 				// This is a retransmission
 				//rist_log_priv(&ctx->common, RIST_LOG_ERROR, "\tResending: %"PRIu32"/%"PRIu16"/%"PRIu32"\n", seq, seq_rtp, ctx->seq);
-				/* Mark SSID for retransmission (change the last bit of the ssrc to 1) */
+				/* Mark SSRC for retransmission (change the last bit of the ssrc to 1) */
 				//hdr->rtp.ssrc |= (1 << 31);
 				hdr->rtp.ssrc = htobe32(p->adv_flow_id | 0x01);
 			}
@@ -245,35 +124,6 @@ size_t rist_send_seq_rtcp(struct rist_peer *p, uint16_t seq_rtp, uint8_t payload
 		memcpy(_payload - hdr_len, hdr, hdr_len);
 	}
 
-	if (ctx->profile > RIST_PROFILE_SIMPLE) {
-		/* Encrypt everything except GRE */
-		if (k->key_size) {
-			// Prepare GRE header
-			struct rist_gre_key_seq_real *gre_key_seq = (void *) header_buf;
-			gre_key_seq->flags2 |= (p->rist_gre_version &0x7) << 3;
-			if (p->rist_gre_version && k->key_size == 256)
-			{
-				gre_key_seq->flags2 |= (1 & 1UL) << 6;
-			}
-			SET_BIT(gre_key_seq->flags1, 5); // set key flag
-			SET_BIT(gre_key_seq->flags1, 4); // set seq bit
-
-			gre_key_seq->prot_type = htobe16(proto_type);
-			gre_key_seq->seq = htobe32(seq);
-
-			_librist_crypto_psk_encrypt(&p->key_tx, gre_key_seq->seq, p->rist_gre_version, (unsigned char *)(_payload - hdr_len), (unsigned char *)(_payload - hdr_len), (hdr_len + payload_len));
-			gre_key_seq->nonce = k->gre_nonce;
-		} else {
-			struct rist_gre_hdr *gre_seq = (struct rist_gre_hdr *) header_buf;
-			gre_seq->prot_type = htobe16(proto_type);
-		}
-
-		// now copy the GRE header data
-		len = gre_len + hdr_len + payload_len;
-		data = _payload - gre_len - hdr_len;
-		memcpy(data, header_buf, gre_len);
-	}
-	else
 	{
 		len =  hdr_len + payload_len - RIST_GRE_PROTOCOL_REDUCED_SIZE;
 		data = _payload - hdr_len + RIST_GRE_PROTOCOL_REDUCED_SIZE;
@@ -294,7 +144,10 @@ size_t rist_send_seq_rtcp(struct rist_peer *p, uint16_t seq_rtp, uint8_t payload
 		}
 	}
 
-	ret = sendto(p->sd,(const char*)data, len, 0, &(p->u.address), p->address_len);
+	if (ctx->profile == RIST_PROFILE_SIMPLE)
+		ret = sendto(p->sd,(const char*)data, len, 0, &(p->u.address), p->address_len);
+	else
+		ret = _librist_proto_gre_send_data(p, payload_type, proto_type, data, len, src_port, dst_port, p->rist_gre_version);
 
 out:
 	if (RIST_UNLIKELY(ret <= 0)) {
@@ -302,10 +155,6 @@ out:
 	} else {
 		p->stats_sender_instant.sent++;
 		p->stats_receiver_instant.sent_rtcp++;
-	}
-
-	if (modifyingbuffer) {
-		free(_payload - RIST_MAX_PAYLOAD_OFFSET);
 	}
 
 	return ret;
@@ -480,7 +329,7 @@ void rist_create_socket(struct rist_peer *peer)
 		return;
 	}
 
-	if (peer->local_port) {
+	if (peer->listening) {
 		const char* host;
 		uint16_t port;
 
@@ -499,8 +348,39 @@ void rist_create_socket(struct rist_peer *peer)
 			return;
 		}
 
-		peer->sd = udpsocket_open_bind(host, port, &peer->miface[0]);
+		if (peer->u.address.sa_family == AF_INET)
+		{
+			struct sockaddr_in *addrv4 = (struct sockaddr_in *)&(peer->u);
+			peer->multicast_receiver = IN_MULTICAST(ntohl(addrv4->sin_addr.s_addr));
+		}
+		else
+		{
+			struct sockaddr_in6 *addrv6 = (struct sockaddr_in6 *)&(peer->u);
+			peer->multicast_receiver = IN6_IS_ADDR_MULTICAST(&addrv6->sin6_addr);
+		}
+
+		peer->sd = udpsocket_open_bind(host, port, peer->miface);
 		if (peer->sd >= 0) {
+			if (port == 0)
+			{
+				// Populate peer->local_port with ephemeral port assigned
+				struct sockaddr_storage local_addr;
+				socklen_t n = sizeof( struct sockaddr_storage );
+				if( getsockname( peer->sd, (struct sockaddr *) &local_addr, &n ) != 0)
+					rist_log_priv(get_cctx(peer), RIST_LOG_INFO, "Could not find assigned port (socket# %d)\n", peer->sd);
+				else
+				{
+					if (local_addr.ss_family == AF_INET) {
+						struct sockaddr_in *a = (struct sockaddr_in *)&local_addr;
+						port = a->sin_port;
+					} else {
+						/* ipv6 */
+						struct sockaddr_in6 *a = (struct sockaddr_in6 *)&local_addr;
+						port = a->sin6_port;
+					}
+					peer->local_port = port;
+				}
+			}
 			rist_log_priv(get_cctx(peer), RIST_LOG_INFO, "Starting in URL listening mode (socket# %d)\n", peer->sd);
 		} else {
 			rist_log_priv(get_cctx(peer), RIST_LOG_ERROR, "Could not start in URL listening mode. %s\n", strerror(errno));
@@ -513,15 +393,15 @@ void rist_create_socket(struct rist_peer *peer)
 		if (peer->u.address.sa_family == AF_INET)
 		{
 			struct sockaddr_in *addrv4 = (struct sockaddr_in *)&(peer->u);
-			peer->multicast = IN_MULTICAST(ntohl(addrv4->sin_addr.s_addr));
+			peer->multicast_sender = IN_MULTICAST(ntohl(addrv4->sin_addr.s_addr));
 		}
 		else
 		{
 			struct sockaddr_in6 *addrv6 = (struct sockaddr_in6 *)&(peer->u);
-			peer->multicast = IN6_IS_ADDR_MULTICAST(&addrv6->sin6_addr);
+			peer->multicast_sender = IN6_IS_ADDR_MULTICAST(&addrv6->sin6_addr);
 		}
-		if (peer->multicast) {
-			rist_log_priv(get_cctx(peer), RIST_LOG_INFO, "Peer configured for multicast");
+		if (peer->multicast_sender) {
+			rist_log_priv(get_cctx(peer), RIST_LOG_INFO, "Peer configured for multicast\n");
 		}
 		// We use sendto ... so, no need to connect directly here
 		peer->sd = udpsocket_open(peer->address_family);
@@ -531,7 +411,53 @@ void rist_create_socket(struct rist_peer *peer)
 		else {
 			rist_log_priv(get_cctx(peer), RIST_LOG_ERROR, "Could not start in URL connect mode. %s\n", strerror(errno));
 		}
+		if (peer->miface[0] != '\0') {
+			struct sockaddr_storage ss = {0};
+			rist_log_priv(get_cctx(peer), RIST_LOG_INFO, "Binding socket to %s\n", peer->miface);
+			if (inet_pton(AF_INET, peer->miface,  &((struct sockaddr_in *)&ss)->sin_addr) != 0) {
+				((struct sockaddr_in *)&ss)->sin_family = AF_INET;
+				if (bind(peer->sd, (struct sockaddr*)&ss, sizeof(struct sockaddr_in)) != 0) {
+					rist_log_priv(get_cctx(peer), RIST_LOG_ERROR, "Couldn't bind to %s: %s\n", peer->miface, strerror(errno));
+				}
+			}
+			else if (inet_pton(AF_INET6, peer->miface, &((struct sockaddr_in6 *)&ss)->sin6_addr) != 0) {
+				((struct sockaddr_in6 *)&ss)->sin6_family = AF_INET6;
+				((struct sockaddr_in6 *)&ss)->sin6_port =0;
+				if (bind(peer->sd, (struct sockaddr*)&ss, sizeof(struct sockaddr_in6)) != 0) {
+					rist_log_priv(get_cctx(peer), RIST_LOG_ERROR, "Couldn't bind to %s: %s\n", peer->miface, strerror(errno));
+				}
+			}
+#ifdef __linux__
+			else {
+				struct ifreq ifr = {0};
+				memcpy(ifr.ifr_name, peer->miface, IF_NAMESIZE);
+				if (setsockopt(peer->sd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr)) != 0) {
+					rist_log_priv(get_cctx(peer), RIST_LOG_ERROR, "Couldn't bind to %s: %s\n", peer->miface, strerror(errno));
+				}
+			}
+#elif defined(__APPLE__)
+			else {
+				int idx = if_nametoindex(peer->miface);
+				if (idx == 0) {
+					rist_log_priv(get_cctx(peer), RIST_LOG_ERROR, "Couldn't get device %s index: %s\n", peer->miface, strerror(errno));
+				} else {
+					int proto = peer->u.address.sa_family == AF_INET? IPPROTO_IP : IPPROTO_IPV6;
+					int bound = peer->u.address.sa_family == AF_INET? IP_BOUND_IF : IPV6_BOUND_IF;
+					if (setsockopt(peer->sd, proto, bound, &idx, sizeof(idx)) != 0) {
+						rist_log_priv(get_cctx(peer), RIST_LOG_ERROR, "Couldn't bind to %s: %s\n", peer->miface, strerror(errno));
+					}
+				}
+			}
+#else
+			else {
+				rist_log_priv(get_cctx(peer), RIST_LOG_ERROR, "No method available to bind to %s please supply an IP to bind to\n", peer->miface);
+			}
+#endif
+		}
 		peer->local_port = 32768 + (get_cctx(peer)->peer_counter % 28232);
+#ifdef _WIN32
+		udpsocket_set_nonblocking(peer->sd);
+#endif
 	}
 
 	// Increase default OS udp receive buffer size
@@ -563,122 +489,6 @@ void rist_create_socket(struct rist_peer *peer)
 		peer->sd = -1;
 	}
 #endif
-}
-
-static inline void rist_rtcp_write_empty_rr(uint8_t *buf, int *offset, const uint32_t flow_id) {
-	struct rist_rtcp_rr_empty_pkt *rr = (struct rist_rtcp_rr_empty_pkt *)(buf + RIST_MAX_PAYLOAD_OFFSET + *offset);
-	*offset += sizeof(struct rist_rtcp_rr_empty_pkt);
-	rr->rtcp.flags = RTCP_SR_FLAGS;
-	rr->rtcp.ptype = PTYPE_RR;
-	rr->rtcp.ssrc = htobe32(flow_id);
-	rr->rtcp.len = htons(1);
-}
-
-static inline void rist_rtcp_write_rr(uint8_t *buf, int *offset, const struct rist_peer *peer)
-{
-	struct rist_rtcp_rr_pkt *rr = (struct rist_rtcp_rr_pkt *)(buf + RIST_MAX_PAYLOAD_OFFSET + *offset);
-	*offset += sizeof(struct rist_rtcp_rr_pkt);
-	rr->rtcp.flags = RTCP_RR_FULL_FLAGS;
-	rr->rtcp.ptype = PTYPE_RR;
-	rr->rtcp.ssrc = htobe32(peer->adv_flow_id);
-	rr->rtcp.len = htons(7);
-	/* TODO fix these variables */
-	rr->fraction_lost = 0;
-	rr->cumulative_pkt_loss_msb = 0;
-	rr->cumulative_pkt_loss_lshw = 0;
-	rr->highest_seq = 0;
-	rr->jitter = 0;
-	rr->lsr = htobe32((uint32_t)(peer->last_sender_report_time >> 16));
-	/*  expressed in units of 1/65536  == middle 16 bits?!? */
-	rr->dlsr = htobe32((uint32_t)((timestampNTP_u64() - peer->last_sender_report_ts) >> 16));
-}
-
-static inline void rist_rtcp_write_sr(uint8_t *buf, int *offset, struct rist_peer *peer) {
-	struct rist_rtcp_sr_pkt *sr = (struct rist_rtcp_sr_pkt *)(buf + RIST_MAX_PAYLOAD_OFFSET + *offset);
-	*offset += sizeof(struct rist_rtcp_sr_pkt);
-	/* Populate SR for sender */
-	sr->rtcp.flags = RTCP_SR_FLAGS;
-	sr->rtcp.ptype = PTYPE_SR;
-	sr->rtcp.ssrc = htobe32(peer->adv_flow_id);
-	sr->rtcp.len = htons(6);
-	uint64_t now = timestampNTP_u64();
-	uint64_t now_rtc = timestampNTP_RTC_u64();
-	peer->last_sender_report_time = now_rtc;
-	peer->last_sender_report_ts = now;
-	uint32_t ntp_lsw = (uint32_t)now_rtc;
-	// There is 70 years (incl. 17 leap ones) offset to the Unix Epoch.
-	// No leap seconds during that period since they were not invented yet.
-	uint32_t ntp_msw = now_rtc >> 32;
-	sr->ntp_msw = htobe32(ntp_msw);
-	sr->ntp_lsw = htobe32(ntp_lsw);
-	sr->rtp_ts = htobe32(timestampRTP_u32(0, now));
-	sr->sender_pkts = 0;  //htonl(f->packets_count);
-	sr->sender_bytes = 0; //htonl(f->bytes_count);
-}
-
-static inline void rist_rtcp_write_sdes(uint8_t *buf, int *offset, const char *name, const uint32_t flow_id)
-{
-	size_t namelen = strlen(name);
-	size_t sdes_size = ((10 + namelen + 1) + 3) & ~3;
-	size_t padding = sdes_size - namelen - 10;
-	struct rist_rtcp_sdes_pkt *sdes = (struct rist_rtcp_sdes_pkt *)(buf + RIST_MAX_PAYLOAD_OFFSET + *offset);
-	*offset += sdes_size;
-	/* Populate SDES for sender description */
-	sdes->rtcp.flags = RTCP_SDES_FLAGS;
-	sdes->rtcp.ptype = PTYPE_SDES;
-	sdes->rtcp.len = htons((uint16_t)((sdes_size - 1) >> 2));
-	sdes->rtcp.ssrc = htobe32(flow_id);
-	sdes->cname = 1;
-	sdes->name_len = (uint8_t)namelen;
-	// We copy the extra padding bytes from the source because it is a preallocated buffer
-	// of size 128 with all zeroes
-	memcpy(sdes->udn, name, namelen + padding);
-}
-
-static inline void rist_rtcp_write_echoreq(uint8_t *buf, int *offset, const uint32_t flow_id)
-{
-	struct rist_rtcp_echoext *echo = (struct rist_rtcp_echoext *)(buf + RIST_MAX_PAYLOAD_OFFSET + *offset);
-	*offset += sizeof(struct rist_rtcp_echoext);
-	echo->flags = RTCP_ECHOEXT_REQ_FLAGS;
-	echo->ptype = PTYPE_NACK_CUSTOM;
-	echo->ssrc = htobe32(flow_id);
-	echo->len = htons(5);
-	memcpy(echo->name, "RIST", 4);
-	uint64_t now = timestampNTP_u64();
-	echo->ntp_msw = htobe32((uint32_t)(now >> 32));
-	echo->ntp_lsw = htobe32((uint32_t)(now & 0x000000000FFFFFFFF));
-}
-
-static inline void rist_rtcp_write_echoresp(uint8_t *buf,int *offset, const uint64_t request_time, const uint32_t flow_id) {
-	struct rist_rtcp_echoext *echo = (struct rist_rtcp_echoext *)(buf + RIST_MAX_PAYLOAD_OFFSET + *offset);
-	*offset += sizeof(struct rist_rtcp_echoext);
-	echo->flags = RTCP_ECHOEXT_RESP_FLAGS;
-	echo->ptype = PTYPE_NACK_CUSTOM;
-	echo->len = htons(5);
-	echo->ssrc = htobe32(flow_id);
-	memcpy(echo->name, "RIST", 4);
-	echo->ntp_msw = htobe32((uint32_t)(request_time >> 32));
-	echo->ntp_lsw = htobe32((uint32_t)(request_time & 0x000000000FFFFFFFF));
-	echo->delay = 0;
-}
-
-static inline void rist_rtcp_write_xr_echoreq(uint8_t *buf, int *offset,struct rist_peer *peer)
-{
-	struct rist_rtcp_hdr *xr_hdr = (struct rist_rtcp_hdr *)(buf + RIST_MAX_PAYLOAD_OFFSET + *offset);
-	*offset += sizeof(*xr_hdr);
-	xr_hdr->flags =  0x80;//v=2;p=0;
-	xr_hdr->ptype = PTYPE_XR;
-	xr_hdr->ssrc = htobe32(peer->peer_ssrc);
-	struct rist_rtcp_xr_rrtrb *block = (struct rist_rtcp_xr_rrtrb *)(buf + RIST_MAX_PAYLOAD_OFFSET + *offset);
-	*offset += sizeof(*block);
-	block->block_type = 4;
-	block->length = htobe16(2);
-	block->reserved = 0;
-	uint64_t now = timestampNTP_u64();
-	peer->last_sender_report_ts = now;
-	block->ntp_msw = htobe32((uint32_t)(now >> 32));
-	block->ntp_lsw = htobe32((uint32_t)(now & 0x000000000FFFFFFFF));
-	xr_hdr->len = htobe16(1 + sizeof(*block)/4);
 }
 
 int rist_receiver_periodic_rtcp(struct rist_peer *peer) {
@@ -900,8 +710,8 @@ peer_select:
 
 		if (!peer->is_data || peer->parent)
 			continue;
-#if HAVE_MBEDTLS
-		if (!peer->listening && !eap_is_authenticated(peer->eap_ctx))
+#if HAVE_SRP_SUPPORT
+		if (!peer->listening && !peer->multicast_sender && !eap_is_authenticated(peer->eap_ctx))
 			continue;
 #endif
 		if ((!peer->listening && !peer->authenticated) || peer->dead
@@ -925,13 +735,13 @@ peer_select:
 			if (peer->listening) {
 				struct rist_peer *child = peer->child;
 				while (child) {
-#if HAVE_MBEDTLS
+#if HAVE_SRP_SUPPORT
 					if (!eap_is_authenticated(child->eap_ctx))
 					{
 						//do nothing
 					} else
 #endif
-					if (child->is_data && (!child->dead || (child->dead && (child->dead_since + peer->recovery_buffer_ticks) < now))) {
+					if (child->authenticated && child->is_data && (!child->dead || (child->dead && (child->dead_since + peer->recovery_buffer_ticks) < now))) {
 						uint8_t *payload = buffer->data;
 						rist_send_common_rtcp(child, buffer->type, &payload[RIST_MAX_PAYLOAD_OFFSET], buffer->size, buffer->source_time, buffer->src_port, buffer->dst_port, buffer->seq_rtp);
 					}
@@ -957,13 +767,13 @@ peer_select:
 		if (peer->listening) {
 			struct rist_peer *child = peer->child;
 			while (child) {
-#if HAVE_MBEDTLS
+#if HAVE_SRP_SUPPORT
 					if (!eap_is_authenticated(child->eap_ctx))
 					{
 						//do nothing
 					} else
 #endif
-				if (child->is_data && (!child->dead || (child->dead && (child->dead_since + peer->recovery_buffer_ticks) < now))) {
+				if (child->authenticated && child->is_data && (!child->dead || (child->dead && (child->dead_since + peer->recovery_buffer_ticks) < now))) {
 					uint8_t *payload = buffer->data;
 					rist_send_common_rtcp(child, buffer->type, &payload[RIST_MAX_PAYLOAD_OFFSET], buffer->size, buffer->source_time, buffer->src_port, buffer->dst_port,  buffer->seq_rtp);
 				}
@@ -1015,7 +825,7 @@ ssize_t rist_retry_dequeue(struct rist_sender *ctx)
 
 	// If they request a non-sense seq number, we will catch it when we check the seq number against
 	// the one on that buffer position and it does not match
-	
+
 	size_t idx = rist_sender_index_get(ctx, retry->seq);
 	if (RIST_UNLIKELY(ctx->sender_queue[idx] == NULL)) {
 		rist_log_priv(&ctx->common, RIST_LOG_DEBUG,
@@ -1163,8 +973,8 @@ void rist_retry_enqueue(struct rist_sender *ctx, uint32_t seq, struct rist_peer 
 			// All duplicates allowed, just report it
 			if (ctx->common.debug)
 				rist_log_priv(&ctx->common, RIST_LOG_DEBUG,
-					"Nack request for seq %" PRIu32 " with age %" PRIu64 "ms and rtt_min %" PRIu32 " for peer #%d\n",
-					seq, age_ticks / RIST_CLOCK, peer->config.recovery_rtt_min, peer->adv_peer_id);
+					"Nack request for seq %" PRIu32 " with age %" PRIu64 "ms and rtt_min %" PRIu64 " for peer #%d\n",
+					seq, age_ticks / RIST_CLOCK, peer->config.recovery_rtt_min / RIST_CLOCK, peer->adv_peer_id);
 		} else if (ctx->peer_lst_len == 1) {
 			/* there is a retry outstanding for this buffer, no need to add another */
 			if (buffer->retry_queued)
@@ -1174,12 +984,12 @@ void rist_retry_enqueue(struct rist_sender *ctx, uint32_t seq, struct rist_peer 
 			{
 				// This is a safety check to protect against buggy or non compliant receivers that request the
 				// same seq number without waiting one RTT.
-				uint64_t delta = (now - buffer->last_retry_request) / RIST_CLOCK;
+				uint64_t delta = (now - buffer->last_retry_request);
 				if (ctx->common.debug)
 					rist_log_priv(&ctx->common, RIST_LOG_DEBUG,
-						"Nack request for seq %" PRIu32 " with delta %" PRIu64 "ms, age %" PRIu64 "ms and rtt_min %" PRIu32 "\n",
-						seq, delta, age_ticks / RIST_CLOCK, peer->config.recovery_rtt_min);
-				uint64_t rtt = peer->last_mrtt;
+						"Nack request for seq %" PRIu32 " with delta %" PRIu64 "ms, age %" PRIu64 "ms and rtt_min %" PRIu64 "\n",
+						seq, delta /RIST_CLOCK, age_ticks / RIST_CLOCK, peer->config.recovery_rtt_min / RIST_CLOCK);
+				uint64_t rtt = peer->last_rtt;
 				if (peer->config.recovery_rtt_min > rtt)
 					rtt = peer->config.recovery_rtt_min;
 				if (peer->config.recovery_rtt_max < rtt)
@@ -1192,7 +1002,7 @@ void rist_retry_enqueue(struct rist_sender *ctx, uint32_t seq, struct rist_peer 
 				{
 					rist_log_priv(&ctx->common, RIST_LOG_DEBUG,
 						"Nack request for seq %" PRIu32 ", age %"PRIu64"ms, is already queued (too soon to add another one), skipped, %" PRIu64 " < %" PRIu64 " ms\n",
-						seq, age_ticks / RIST_CLOCK, delta, rtt);
+						seq, age_ticks / RIST_CLOCK, delta / RIST_CLOCK, rtt);
 					peer->stats_sender_instant.bloat_skip++;
 					return;
 				}
@@ -1210,7 +1020,7 @@ void rist_retry_enqueue(struct rist_sender *ctx, uint32_t seq, struct rist_peer 
 			//We work backwards from the write index till we either find a retry with same peer & seq
 			//or it's too old to matter,looking up to 8 RTT's ago (4 in normal mode, 8 in aggressive)
 			size_t index = (ctx->sender_retry_queue_write_index -1) & (ctx->sender_retry_queue_size -1);
-			uint64_t rtt = peer->last_mrtt;
+			uint64_t rtt = peer->last_rtt;
 			if (peer->config.recovery_length_min > rtt)
 				rtt = peer->config.recovery_length_min;
 			// Aggressive congestion control only allows every two RTTs
@@ -1228,7 +1038,7 @@ void rist_retry_enqueue(struct rist_sender *ctx, uint32_t seq, struct rist_peer 
 			}
 			retry = &ctx->sender_retry_queue[index];
 			if (retry->seq == seq && retry->peer == peer) {
-				delta = (now - retry->insert_time) / RIST_CLOCK;
+				delta = (now - retry->insert_time);
 				/* this retry hasn't been handled yet, it makes no sense to insert a duplicate */
 				if (retry->active)
 					return;
@@ -1236,15 +1046,15 @@ void rist_retry_enqueue(struct rist_sender *ctx, uint32_t seq, struct rist_peer 
 				{
 					rist_log_priv(&ctx->common, RIST_LOG_DEBUG,
 						"Nack request for seq %" PRIu32 " with delta %" PRIu64 "ms (age %"PRIu64"ms) is already queued (too soon to add another one), skipped, peer #%d '%s'\n",
-						seq, delta, age_ticks / RIST_CLOCK, peer->adv_peer_id, peer->receiver_name);
+						seq, delta / RIST_CLOCK, age_ticks / RIST_CLOCK, peer->adv_peer_id, peer->receiver_name);
 					peer->stats_sender_instant.bloat_skip++;
 					return;
 				}
 			}
 			if (ctx->common.debug) {
 				rist_log_priv(&ctx->common, RIST_LOG_DEBUG,
-					"Nack request for seq %" PRIu32 " with delta %" PRIu64 "ms (age %"PRIu64"ms) and rtt_min %" PRIu32 " for peer #%d '%s'\n",
-					seq, delta, age_ticks / RIST_CLOCK, peer->config.recovery_rtt_min, peer->adv_peer_id, peer->receiver_name);
+					"Nack request for seq %" PRIu32 " with delta %" PRIu64 "ms (age %"PRIu64"ms) and rtt_min %" PRIu64 " for peer #%"PRIu32" '%s'\n",
+					seq, delta / RIST_CLOCK, age_ticks / RIST_CLOCK, peer->config.recovery_rtt_min / RIST_CLOCK, peer->adv_peer_id, peer->receiver_name);
 			}
 		}
 	}
@@ -1290,3 +1100,4 @@ void rist_print_inet_info(char *prefix, struct rist_peer *peer)
 	}
 
 }
+
