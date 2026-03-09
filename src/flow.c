@@ -9,9 +9,10 @@
 #include "rist-private.h"
 #include "log-private.h"
 #include "udp-private.h"
+#include "proto/rist_time.h"
 #include <assert.h>
 
-void rist_receiver_missing(struct rist_flow *f, struct rist_peer *peer,uint64_t nack_time, uint32_t seq, uint32_t rtt)
+void rist_receiver_missing(struct rist_flow *f, struct rist_peer *peer,uint64_t nack_time, uint32_t seq, uint64_t rtt)
 {
 	struct rist_missing_buffer *m = calloc(1, sizeof(*m));
 	uint64_t now = timestampNTP_u64();
@@ -22,7 +23,7 @@ void rist_receiver_missing(struct rist_flow *f, struct rist_peer *peer,uint64_t 
 	m->seq = seq;
 	m->insertion_time = nack_time;
 
-	m->next_nack = now + (uint64_t)rtt * (uint64_t)RIST_CLOCK;
+	m->next_nack = now + rtt;
 	m->peer = peer;
 
 	if (get_cctx(peer)->debug)
@@ -280,6 +281,7 @@ int rist_receiver_associate_flow(struct rist_peer *p, uint32_t flow_id)
 		else
 			f->receiver_queue_max = RIST_SERVER_QUEUE_BUFFERS;
 
+		f->recovery_buffer_ticks = p->recovery_buffer_ticks;
 		rist_log_priv(&ctx->common, RIST_LOG_INFO, "FLOW #%"PRIu32" created (short=%d)\n", flow_id, f->short_seq);
 	} else {
 		/* double check that this peer is not a member of this flow already */
@@ -294,22 +296,22 @@ int rist_receiver_associate_flow(struct rist_peer *p, uint32_t flow_id)
 		}
 	}
 
-	// Transfer variables from peer to flow
-	// Set/update max flow buffer size
-	if (f->recovery_buffer_ticks < p->recovery_buffer_ticks) {
-		if (f->stats_report_time == f->recovery_buffer_ticks)
-			f->stats_report_time = p->recovery_buffer_ticks;
-		f->recovery_buffer_ticks = p->recovery_buffer_ticks;
-		if ((f->recovery_buffer_ticks *2ULL) > f->session_timeout)
-			f->session_timeout = 2ULL * f->recovery_buffer_ticks;
+	if (p->config.recovery_length_min != p->config.recovery_length_max) {
+		f->flow_auto_buffer_scaling = true;
 	}
+
+	if (p->session_timeout > f->session_timeout) {
+		f->session_timeout = p->session_timeout;
+		rist_log_priv(&ctx->common, RIST_LOG_INFO, "Setting flow session timeout to %"PRIu64"ms\n", f->session_timeout / RIST_CLOCK);
+	}
+
 	// Set the flow timeout as the buffer size for the flow
 	// However, we start with 250 ms as the minimum/default
 	// to make sure it is larger than the RTCP interval
 	if (f->recovery_buffer_ticks > f->flow_timeout)
 		f->flow_timeout = f->recovery_buffer_ticks;
 	uint64_t stats_report_time = get_cctx(p)->stats_report_time;
-	if (stats_report_time != 0 && stats_report_time != f->stats_report_time) 
+	if (stats_report_time != 0 && stats_report_time != f->stats_report_time)
 		f->stats_report_time = stats_report_time;
 
 	// Set/update max missing counter
@@ -338,7 +340,7 @@ int rist_receiver_associate_flow(struct rist_peer *p, uint32_t flow_id)
 size_t rist_best_rtt_index(struct rist_flow *f)
 {
 	size_t index = 0;
-	uint32_t rtt = UINT32_MAX;
+	uint64_t rtt = UINT64_MAX;
 	for (size_t i = 0; i < f->peer_lst_len; i++) {
 		if (!f->peer_lst[i]->is_rtcp)
 			continue;

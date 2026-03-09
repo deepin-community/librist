@@ -12,8 +12,13 @@
 #include "udp-private.h"
 #include "vcs_version.h"
 #include "rist-thread.h"
+#include "proto/rist_time.h"
 #include <librist/version.h>
 #include "crypto/crypto-private.h"
+#include "crypto/psk.h"
+#if HAVE_SRP_SUPPORT
+#include "proto/eap.h"
+#endif
 #include <assert.h>
 #ifdef _WIN32
 #include <processthreadsapi.h>
@@ -198,11 +203,7 @@ int rist_receiver_data_read2(struct rist_ctx *rist_ctx, struct rist_data_block *
 
 	*data_buffer = data_block;
 
-	bool overflow = false;
-	while (!atomic_compare_exchange_weak(&f->fifo_overflow, &overflow, false)) {
-		//
-	}
-	if (overflow)
+	if (RIST_UNLIKELY(f->fifo_overflow == true))
 		data_block->flags |= RIST_DATA_FLAGS_OVERFLOW;
 
 	return (int)num;
@@ -220,7 +221,7 @@ void rist_receiver_data_block_free2(struct rist_data_block **block)
 		free_data_block(block);
 }
 
-uint32_t rist_flow_id_create()
+uint32_t rist_flow_id_create(void)
 {
 	uint32_t u32 = prand_u32();
 	u32 &= ~(1UL << 0);
@@ -436,16 +437,33 @@ int rist_sender_flow_id_get(struct rist_ctx *rist_ctx, uint32_t *flow_id)
 	return 0;
 }
 
-int rist_sender_npd_enable(struct rist_ctx *rist_ctx)
+int rist_sender_npd_get(const struct rist_ctx *rist_ctx, bool *npd)
 {
 	if (RIST_UNLIKELY(!rist_ctx))
 	{
-		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_flow_id_set call with null context");
+		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_npd_get call with null context");
 		return -1;
 	}
 	if (RIST_UNLIKELY(rist_ctx->mode != RIST_SENDER_MODE || !rist_ctx->sender_ctx))
 	{
-		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_flow_id_set call with ctx not set up for sending\n");
+		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_npd_get call with ctx not set up for sending\n");
+		return -1;
+	}
+	const struct rist_sender *ctx = rist_ctx->sender_ctx;
+	*npd = ctx->null_packet_suppression;
+	return 0;
+}
+
+int rist_sender_npd_enable(struct rist_ctx *rist_ctx)
+{
+	if (RIST_UNLIKELY(!rist_ctx))
+	{
+		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_npd_enable call with null context");
+		return -1;
+	}
+	if (RIST_UNLIKELY(rist_ctx->mode != RIST_SENDER_MODE || !rist_ctx->sender_ctx))
+	{
+		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_npd_enable call with ctx not set up for sending\n");
 		return -1;
 	}
 	struct rist_sender *ctx = rist_ctx->sender_ctx;
@@ -458,12 +476,12 @@ int rist_sender_npd_disable(struct rist_ctx *rist_ctx)
 {
 	if (RIST_UNLIKELY(!rist_ctx))
 	{
-		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_flow_id_set call with null context");
+		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_npd_disable call with null context");
 		return -1;
 	}
 	if (RIST_UNLIKELY(rist_ctx->mode != RIST_SENDER_MODE || !rist_ctx->sender_ctx))
 	{
-		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_flow_id_set call with ctx not set up for sending\n");
+		rist_log_priv3(RIST_LOG_ERROR, "rist_sender_npd_disable call with ctx not set up for sending\n");
 		return -1;
 	}
 	struct rist_sender *ctx = rist_ctx->sender_ctx;
@@ -652,6 +670,22 @@ int rist_stats_free(const struct rist_stats *stats_container)
 	return 0;
 }
 
+uint32_t rist_peer_get_id(const struct rist_peer *peer)
+{
+    return peer->adv_peer_id;
+}
+
+uint32_t rist_peer_get_cname(const struct rist_peer *peer, const char **cname)
+{
+	if (peer)
+	{
+		*cname = &peer->cname[0];
+		return strlen(*cname);
+	}
+	else
+		return 0;
+}
+
 int rist_peer_config_free(const struct rist_peer_config **peer_config)
 {
   return rist_peer_config_free2((struct rist_peer_config **)peer_config);
@@ -665,6 +699,30 @@ int rist_peer_config_free2(struct rist_peer_config **peer_config)
 	}
 	return 0;
 }
+
+#if HAVE_SRP_SUPPORT
+int rist_peer_update_secret(struct rist_peer *peer, const char* password) {
+	pthread_mutex_lock(&peer->peer_lock);
+	size_t password_len = strlen(password);
+	struct rist_key *inactive_key = (peer->key_rx_odd_active) ? &peer->key_tx : &peer->key_tx_odd;
+	rist_log_priv(get_cctx(peer), RIST_LOG_INFO, "Updating passphrase to %s\n", password);
+	_librist_crypto_psk_set_passphrase(inactive_key, (const uint8_t *)password, password_len);
+	struct rist_peer *child = peer->child;
+	while (child != NULL) {
+		pthread_mutex_lock(&child->peer_lock);
+		inactive_key = (child->key_rx_odd_active) ? &child->key_tx : &child->key_tx_odd;
+		_librist_crypto_psk_set_passphrase(inactive_key, (const uint8_t *)password, password_len);
+		child->rolling_over_passphrase = true;
+		pthread_mutex_unlock(&child->peer_lock);
+		rist_eap_send_passphrase(child->eap_ctx, password);
+		child = child->sibling_next;
+	}
+	peer->rolling_over_passphrase = true;
+	pthread_mutex_unlock(&peer->peer_lock);
+	rist_eap_send_passphrase(peer->eap_ctx, password);
+	return 0;
+}
+#endif
 
 int rist_logging_settings_free(const struct rist_logging_settings **logging_settings)
 {
@@ -774,8 +832,8 @@ int rist_peer_config_defaults_set(struct rist_peer_config *peer_config)
 		peer_config->recovery_mode = RIST_DEFAULT_RECOVERY_MODE;
 		peer_config->recovery_maxbitrate = RIST_DEFAULT_RECOVERY_MAXBITRATE;
 		peer_config->recovery_maxbitrate_return = RIST_DEFAULT_RECOVERY_MAXBITRATE_RETURN;
-		peer_config->recovery_length_min = RIST_DEFAULT_RECOVERY_LENGHT_MIN;
-		peer_config->recovery_length_max = RIST_DEFAULT_RECOVERY_LENGHT_MAX;
+		peer_config->recovery_length_min = RIST_DEFAULT_RECOVERY_LENGTH_MIN;
+		peer_config->recovery_length_max = RIST_DEFAULT_RECOVERY_LENGTH_MAX;
 		peer_config->recovery_reorder_buffer = RIST_DEFAULT_RECOVERY_REORDER_BUFFER;
 		peer_config->recovery_rtt_min = RIST_DEFAULT_RECOVERY_RTT_MIN;
 		peer_config->recovery_rtt_max = RIST_DEFAULT_RECOVERY_RTT_MAX;
@@ -859,7 +917,7 @@ static int rist_receiver_peer_create(struct rist_receiver *ctx,
 	}
 	else
 	{
-		p->rist_gre_version = 1;
+		p->rist_gre_version = RIST_GRE_VERSION_MIN;
 		p->is_rtcp = true;
 	}
 
@@ -884,6 +942,8 @@ static int rist_sender_peer_create(struct rist_sender *ctx,
 	// TODO: Validate config data (virt_dst_port != 0 for example)
 
 	newpeer->is_data = true;
+	if (config->weight > 0)
+		newpeer->w_count = config->weight;
 	peer_append(newpeer);
 
 	if (ctx->common.profile == RIST_PROFILE_SIMPLE)
@@ -909,7 +969,7 @@ static int rist_sender_peer_create(struct rist_sender *ctx,
 	}
 	else
 	{
-		newpeer->rist_gre_version = 1;
+		newpeer->rist_gre_version = RIST_GRE_VERSION_MIN;
 		newpeer->peer_data = newpeer;
 		newpeer->is_rtcp = true;
 		newpeer->compression = config->compression;
@@ -949,6 +1009,20 @@ int rist_peer_create(struct rist_ctx *ctx, struct rist_peer **peer, const struct
 	else
 		return -1;
 	pthread_mutex_unlock(&cctx->peerlist_lock);
+	return ret;
+}
+
+int rist_peer_get_socket(struct rist_peer *peer, int *socket, int *socket_extra) {
+	if (socket == NULL)
+		return -1;
+	if (peer->parent != NULL)
+		return -1;
+	*socket = peer->sd;
+	int ret = 0;
+	if (socket_extra != NULL && get_cctx(peer)->profile == RIST_PROFILE_SIMPLE) {
+		*socket_extra = peer->peer_rtcp->sd;
+		ret = 1;
+	}
 	return ret;
 }
 
@@ -1166,14 +1240,14 @@ int rist_set_opt(struct rist_ctx *ctx, enum rist_opt opt, void* optval1, void* o
 		cctx = &ctx->sender_ctx->common;
 	else
 		return -1;
-	
+
 	switch(opt) {
 	case RIST_OPT_THREAD_CALLBACK:
 		;
 		rist_thread_callback_t *thread_callback  = optval1;
 		if (thread_callback == NULL || thread_callback->thread_callback == NULL || optval3 != NULL)
 			return -1;
-		if (atomic_load_explicit(&cctx->startup_complete, memory_order_acquire)) 
+		if (atomic_load_explicit(&cctx->startup_complete, memory_order_acquire))
 			return -1;
 		cctx->thread_callback = thread_callback->thread_callback;
 		cctx->thread_callback_arg = optval2;

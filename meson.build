@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 project('libRIST', 'c',
-	version: '0.2.7',
+	version: '0.2.11',
 	default_options: ['c_std=c99', 'warning_level=3', 'libdir=lib'],
         meson_version: '>= 0.51.0')
 
@@ -17,9 +17,9 @@ cdata = configuration_data()
 #If any interfaces have been added, removed, or changed since the last update, increment current, and set revision to 0.
 #If any interfaces have been added since the last public release, then increment age.
 #If any interfaces have been removed or changed since the last public release, then set age to 0.
-librist_abi_current = 6
+librist_abi_current = 8
 librist_abi_revision = 0
-librist_abi_age = 2
+librist_abi_age = 4
 librist_soversion = librist_abi_current - librist_abi_age
 librist_version = '@0@.@1@.@2@'.format(librist_abi_current - librist_abi_age, librist_abi_age, librist_abi_revision)
 
@@ -30,21 +30,35 @@ librist_version = '@0@.@1@.@2@'.format(librist_abi_current - librist_abi_age, li
 #PATCH not used (doesn't make sense for API version, remains here for backwards compat)
 
 librist_api_version_major = 4
-librist_api_version_minor = 2
+librist_api_version_minor = 5
 librist_api_version_patch = 0
 
 librist_src_root = meson.current_source_dir()
 
 deps = []
 platform_files = []
-contrib_libs = []
 inc = []
 inc += include_directories('.', 'src', 'include/librist', 'include', 'contrib')
+if (host_machine.system() == 'darwin')
+	r = run_command('brew', '--prefix', check: true)
+	brewoutput = r.stdout().strip()
+	inc += include_directories(brewoutput + '/include')
+endif
 
 #builtin_lz4 = get_option('builtin_lz4')
 builtin_cjson = get_option('builtin_cjson')
 builtin_mbedtls = get_option('builtin_mbedtls')
 use_mbedtls = get_option('use_mbedtls')
+use_nettle = get_option('use_nettle')
+use_gnutls = get_option('use_gnutls')
+
+if not use_gnutls
+	if use_nettle
+		warning('use_nettle is deprecated, use use_gnutls')
+	endif
+	use_gnutls = use_nettle
+endif
+
 cdata.set10('ALLOW_INSECURE_IV_FALLBACK', get_option('allow_insecure_iv_fallback'))
 
 required_library = false
@@ -63,8 +77,21 @@ have_clock_gettime = false
 threads = []
 test_args = []
 if host_machine.system() == 'windows'
-	deps += [ cc.find_library('ws2_32') ]
-	add_project_arguments(['-D_WIN32_WINNT=0x0601'], language: 'c')
+	deps += [
+		cc.find_library('ws2_32'),
+		cc.find_library('iphlpapi')
+	]
+
+windows_version_test = '''
+#include <windef.h>
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+# error _WIN32_WINNT toolchain default not high enough
+#endif
+'''
+	if not cc.compiles(windows_version_test, name: '_WIN32_WINNT includes Vista')
+		add_project_arguments(['-D_WIN32_WINNT=0x0600'], language: 'c')
+	endif
+
 	if get_option('default_library') != 'static'
 		add_project_arguments(['-DLIBRIST_BUILDING_DLL'], language: 'c')
 	endif
@@ -86,16 +113,32 @@ if host_machine.system() == 'windows'
 	#Windows meson tends to break on pkgconfig/Cmake finding, so use builtin libraries
 	librist_soversion = ''
 else
-	if host_machine.system() == 'linux'
+	if host_machine.system() == 'linux' or host_machine.system() == 'android'
 		test_args += '-D_GNU_SOURCE'
 		add_project_arguments('-D_GNU_SOURCE', language: 'c')
 		if cc.check_header('linux/if_alg.h')
 			add_project_arguments(['-DLINUX_CRYPTO'], language: 'c')
 			platform_files += 'contrib/linux-crypto.c'
 		endif
+		checkgetif = '''
+#include <ifaddrs.h>
+
+void test(void) {
+	struct ifaddrs *ifaddr = NULL;
+	getifaddrs(&ifaddr);
+}
+'''
+		hasgetifaddrs = cc.compiles(checkgetif)
+		if not hasgetifaddrs and host_machine.system() == 'android'
+			platform_files += 'compat/android/ifaddrs.c'
+			inc += include_directories('compat/android')
+		endif
 	elif host_machine.system() == 'darwin'
 		test_args += '-D_DARWIN_C_SOURCE'
 		add_project_arguments('-D_DARWIN_C_SOURCE', language: 'c')
+	elif host_machine.system() == 'gnu'
+		test_args += '-D_GNU_SOURCE'
+		add_project_arguments('-D_GNU_SOURCE', language: 'c')
 	endif
 	librist_soversion = librist_soversion
 	have_clock_gettime = cc.has_function('clock_gettime', prefix : '#include <time.h>', args : test_args)
@@ -130,6 +173,27 @@ endif
 cdata.set10('HAVE_CLOCK_GETTIME', have_clock_gettime)
 cdata.set10('HAVE_PTHREADS', have_pthreads)
 
+sock_un_h = cc.has_header('sys/un.h')
+cdata.set10('HAVE_SOCK_UN_H', sock_un_h)
+microhttpd = dependency('libmicrohttpd', required: false)
+cdata.set10('HAVE_LIBMICROHTTPD', microhttpd.found())
+if microhttpd.found()
+	code = '''
+#include <microhttpd.h>
+static enum MHD_Result test(void) {
+	return MHD_NO;
+}'''
+	cdata.set10('MICROHTTPD_HAS_RESULT_ENUM',cc.compiles(code, dependencies: [microhttpd], name: 'libmicrohttpd has MHD_Result enum'))
+	code = '''
+#include <microhttpd.h>
+static void test(void) {
+	MHD_start_daemon(MHD_USE_AUTO_INTERNAL_THREAD, 0, NULL, NULL, NULL, NULL, MHD_OPTION_END);
+}'''
+	cdata.set10('MICROHTTPD_HAS_AUTO_INTERNAL_THREAD',cc.compiles(code, dependencies: [microhttpd], name: 'libmicrohttpd has MHD_USE_AUTO_INTERNAL_THREAD flag'))
+endif
+compile_prometheus = sock_un_h or microhttpd.found()
+cdata.set10('HAVE_PROMETHEUS_SUPPORT', compile_prometheus)
+
 if cc.has_argument('-fvisibility=hidden')
     add_project_arguments('-fvisibility=hidden', language: 'c')
 else
@@ -156,7 +220,7 @@ endif
 
 #On ubuntu cjson does not come with pkgconfig files, hence the extended checking.
 if not builtin_cjson
-	cjson_lib = dependency('cJSON', required: false)
+	cjson_lib = dependency('libcjson', required: false)
 	if not cjson_lib.found()
 		cjson_lib = cc.find_library('cjson', required: required_library, has_headers: ['cjson/cJSON.h'])
 		if not cjson_lib.found()
@@ -179,11 +243,28 @@ if get_option('use_tun')
 	endif
 endif
 
+crypto_deps = []
+
 mbedcrypto_lib_found = false
 if use_mbedtls
 	message('Building mbedtls')
 	subdir('contrib/mbedtls')
+
+	crypto_deps += mbedcrypto_lib
+elif use_gnutls
+	crypto_deps = [dependency('nettle'), dependency('hogweed')]
+	test_mini_gmp = '''
+#include <nettle/bignum.h>
+#if !NETTLE_USE_MINI_GMP
+	#error "Need to link gmp"
+#endif
+'''
+	if not cc.compiles(test_mini_gmp, name: 'Nettle with mini-gmp?', dependencies: crypto_deps)
+		crypto_deps += dependency('gmp')
+	endif
+	crypto_deps += dependency('gnutls')#Just for random numbers at the moment :/
 endif
+deps += crypto_deps
 
 subdir('include')
 
@@ -203,26 +284,51 @@ if get_option('allow_obj_filter') and get_option('default_library') != 'shared' 
 	endif
 endif
 
+if not mbedcrypto_lib_found and not use_gnutls
+	platform_files += [
+		'contrib/aes.c',
+		'contrib/sha256.c',
+		'contrib/fastpbkdf2.c',
+	]
+endif
+
+have_srp = mbedcrypto_lib_found or use_gnutls
+
+if have_srp
+    platform_files += 'src/proto/eap.c'
+	platform_files += 'src/crypto/srp_constants.c'
+	platform_files += 'src/crypto/srp.c'
+	platform_files += 'src/crypto/random.c'
+endif
+
+cdata.set10('HAVE_MBEDTLS', mbedcrypto_lib_found)
+cdata.set10('HAVE_NETTLE', use_gnutls and not mbedcrypto_lib_found)
+# Generate config.h
+config_file = configure_file(output: 'config.h', configuration: cdata)
+
 librist = library('librist',
 	'src/crypto/crypto.c',
 	'src/crypto/psk.c',
+	'src/proto/gre.c',
+	'src/proto/rtp.c',
+	'src/proto/rist_time.c',
 	'src/flow.c',
 	'src/logging.c',
+	'src/network.c',
 	'src/rist.c',
 	'src/rist-common.c',
 	'src/rist_ref.c',
 	'src/rist-thread.c',
 	'src/mpegts.c',
+	'src/peer.c',
 	'src/udp.c',
 	'src/stats.c',
 	'src/udpsocket.c',
 	'src/libevsocket.c',
-	'contrib/aes.c',
-	'contrib/sha256.c',
-	'contrib/fastpbkdf2.c',
 	'contrib/stdio-shim.c',
 	'contrib/time-shim.c',
 	'contrib/pthread-shim.c',
+	config_file,
 	platform_files,
 	rev_target,
 	include_directories: inc,
@@ -274,16 +380,13 @@ if get_option('static_analyze')
 	run_target('cppcheck', command : ['cppcheck',
 									  '--quiet',
 									  '--std=c99',
-									  '--suppressions-list=' + join_paths(meson.source_root(), 'common/configs/cppcheck-suppressions.txt'),
+									  '--suppressions-list=' + join_paths(librist_src_root, 'common/configs/cppcheck-suppressions.txt'),
 									  '--project=' + join_paths(meson.build_root(),
 									  'compile_commands.json')])
-	run_target('analyze', command: ['bash', join_paths(meson.source_root(), 'common/scripts/analyze.sh')])
+	run_target('analyze', command: ['bash', join_paths(librist_src_root, 'common/scripts/analyze.sh')])
 endif
 
 librist_dep = declare_dependency(include_directories: inc, link_with : librist)
-
-# Generate config.h
-config_h_target = configure_file(output: 'config.h', configuration: cdata)
 
 if get_option('built_tools')
 	message('Building tools')
