@@ -1,14 +1,15 @@
 Source: librist
 Section: libs
 Priority: optional
-Standards-Version: 4.6.0
+Standards-Version: 4.7.0
 Homepage: https://code.videolan.org/rist/librist
 Maintainer: Florian Ernst <florian@debian.org>
 Build-Depends:
  debhelper-compat (= 13),
  meson,
  cmake,
- pkg-config,
+ pkgconf,
+ libmicrohttpd-dev,
  libcjson-dev,
  libmbedtls-dev,
  libcmocka-dev,
@@ -20,6 +21,8 @@ Package: librist-dev
 Section: libdevel
 Depends:
  librist4 (= ${binary:Version}),
+ libcjson-dev,
+ libmbedtls-dev,
  ${misc:Depends},
 Architecture: any
 Multi-Arch: same

@@ -27,31 +27,6 @@
 /* Type used for the number of file descriptors. */
 typedef unsigned long int nfds_t;
 
-#if !defined(_WIN32_WINNT) || (_WIN32_WINNT < 0x0600)
-/* Data structure describing a polling request. */
-struct pollfd {
-	int fd; /* file descriptor */
-	short events; /* requested events */
-	short revents; /* returned events */
-};
-
-/* Event types that can be polled */
-#define POLLIN 0x001 /* There is data to read. */
-#define POLLPRI 0x002 /* There is urgent data to read. */
-#define POLLOUT 0x004 /* Writing now will not block. */
-
-# define POLLRDNORM 0x040 /* Normal data may be read. */
-# define POLLRDBAND 0x080 /* Priority data may be read. */
-# define POLLWRNORM 0x100 /* Writing now will not block. */
-# define POLLWRBAND 0x200 /* Priority data may be written. */
-
-/* Event types always implicitly polled. */
-#define POLLERR 0x008 /* Error condition. */
-#define POLLHUP 0x010 /* Hung up. */
-#define POLLNVAL 0x020 /* Invalid polling request. */
-
-#endif
-
 #include "contrib/poll_win.c"
 
 #else
@@ -207,7 +182,7 @@ static void rebuild_poll(struct evsocket_ctx *ctx)
 
 	if (ctx->n_events > 0) {
 		ctx->pfd = malloc(sizeof(struct pollfd) * ctx->n_events);
-		ctx->_array = calloc(sizeof(struct evsocket_event), ctx->n_events);
+		ctx->_array = calloc(ctx->n_events, sizeof(struct evsocket_event));
 	}
 
 	if ((!ctx->pfd) || (!ctx->_array)) {

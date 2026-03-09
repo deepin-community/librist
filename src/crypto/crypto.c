@@ -6,11 +6,12 @@
  */
 
 #include "crypto-private.h"
+#include "proto/rist_time.h"
 #include "udp-private.h"
 #include "sha256.h"
 #include <string.h>
 #include <stdlib.h>
-
+/*
 // This is intended for verifying that the peer has the same passphrase
 // Usecase: "reply attack protection"
 uint64_t rist_siphash(uint64_t birthtime, uint32_t seq, const char *phrase)
@@ -39,10 +40,11 @@ uint64_t rist_siphash(uint64_t birthtime, uint32_t seq, const char *phrase)
 
 	return out;
 }
+*/
 
 static bool seeded = false;
 //Generate pseudo-random 32 bit
-uint32_t prand_u32() {
+uint32_t prand_u32(void) {
 	if (!seeded) {
 		srand((unsigned int)timestampNTP_u64());
 		seeded = true;

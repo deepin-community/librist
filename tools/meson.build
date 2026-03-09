@@ -17,9 +17,15 @@ if filter_obj
 endif
 
 srp_shared = []
-if use_mbedtls
+if have_srp
 	srp_shared += 'srp_shared.c'
-	tools_dependencies += mbedcrypto_lib
+	tools_dependencies += crypto_deps
+endif
+
+if compile_prometheus
+	prometheuslib = static_library('prometheus', 'prometheus-exporter.c', include_directories: inc)
+	prometheus_dep = declare_dependency(link_with: prometheuslib, include_directories: include_directories('.'), dependencies: microhttpd)
+	tools_dependencies += prometheus_dep
 endif
 
 executable('ristsender',
@@ -28,7 +34,7 @@ executable('ristsender',
 		librist_dep,
 		threads,
 		stdatomic_dependency,
-		tools_dependencies
+		tools_dependencies,
 	],
 	include_directories: inc,
 	install: should_install)
@@ -40,6 +46,7 @@ executable('ristreceiver',
 		tools_dependencies,
 		threads,
 	],
+
 	include_directories: inc,
 	install: should_install)
 
@@ -53,14 +60,13 @@ executable('rist2rist',
 	include_directories: inc,
 	install: should_install)
 
-if use_mbedtls
+if mbedcrypto_lib_found or use_nettle
 	executable('ristsrppasswd',
-			['ristsrppasswd.c', '../contrib/srp.c', tools_deps],
+			['ristsrppasswd.c', tools_deps],
 			dependencies: [
-				mbedcrypto_lib,
 				librist_dep,
+				crypto_deps,
 			],
 			include_directories: inc,
 			install: should_install)
 endif
-

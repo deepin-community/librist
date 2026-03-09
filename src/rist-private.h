@@ -26,11 +26,11 @@
 #include "libevsocket.h"
 #include "librist.h"
 #include "udpsocket.h"
-#include "aes.h"
 #include "crypto/psk.h"
 #include <errno.h>
 #include <stdatomic.h>
 #include "librist/logging.h"
+#include "proto/gre.h"
 
 #undef RIST_DEPRECATED
 
@@ -43,12 +43,8 @@
 #define RIST_DATAOUT_QUEUE_BUFFERS (1024)
 // This will restrict the use of the library to the configured maximum packet size
 #define RIST_MAX_PACKET_SIZE (10000)
-
 #define RIST_RTT_MIN (3)
-// this value is UINT32_MAX 4294967.296
-#define RIST_CLOCK (4294967LL)
-#define ONE_SECOND (1000 * RIST_CLOCK)
-#define RIST_LOG_QUIESCE_TIMER  ONE_SECOND
+
 /* nack requests are sent every time a data packet is received. */
 /* this timer will be triggered to ensure we output nacks even when there is no data coming in */
 #define RIST_MAX_JITTER (5) /* In milliseconds */
@@ -191,6 +187,8 @@ struct rist_flow {
 	pthread_rwlock_t queue_lock;
 
 	bool receiver_queue_has_items;
+	bool flow_auto_buffer_scaling;
+	bool currently_scaling_buffer;
 	atomic_ulong receiver_queue_size;  /* size in bytes */
 	uint64_t recovery_buffer_ticks;    /* size in ticks */
 	uint64_t stats_report_time; 	   /* in ticks */
@@ -204,7 +202,7 @@ struct rist_flow {
 	uint32_t missing_counter;
 
 	struct rist_peer_flow_stats stats_instant;
-	struct rist_peer_flow_stats stats_total;
+	struct rist_peer_flow_stats stats_total;//TODO: use the total stats!
 	struct rist_bandwidth_estimation bw;
 	uint64_t stats_next_time;
 	uint64_t checks_next_time;
@@ -303,6 +301,7 @@ struct rist_common_ctx {
 		uint8_t enc[RIST_MAX_PACKET_SIZE];
 		uint8_t dec[RIST_MAX_PACKET_SIZE];
 		uint8_t recv[RIST_MAX_PACKET_SIZE];
+		uint8_t recv_npd[RIST_MAX_PACKET_SIZE];
 		uint8_t rtcp[RIST_MAX_PACKET_SIZE];
 	} buf;
 	struct rist_buffer *rist_free_buffer;
@@ -458,12 +457,14 @@ struct rist_ctx {
 
 struct rist_peer {
 	/* linked list */
+	pthread_mutex_t peer_lock;//Currently only used for setting password & in sending/receiving
 	struct rist_peer *next;
 	struct rist_peer *prev;
 
 	/* For simple profile authentication chain (data and rtcp on different ports) */
 	struct rist_peer *peer_rtcp;
 	struct rist_peer *peer_data;
+	bool handled_first;
 	bool is_rtcp;
 	bool is_data;
 	/* sender only: peer is known to respond to echo requests use those to calculate RTT instead */
@@ -490,6 +491,7 @@ struct rist_peer {
 
 	/* Config */
 	struct rist_peer_config config;
+	uint64_t sender_max_buffer_ticks;
 	uint64_t recovery_buffer_ticks;
 
 	bool buffer_bloat_active;
@@ -503,18 +505,24 @@ struct rist_peer {
 
 	/* Data sending */
 	uint32_t seq;
-	uint32_t eight_times_rtt;
+	uint64_t eight_times_rtt;
 	uint32_t w_count; /* Counter for weight in distributed send */
 
 	/* RTT statistics */
-	uint32_t last_mrtt;
+	uint64_t last_rtt;
 
 	/* Missing queue max size */
 	uint32_t missing_counter_max;
 
 	/* Encryption */
+	bool supports_otf_passphrase_change;
 	struct rist_key key_tx; // used for transmitted packets
 	struct rist_key key_rx; // used for received packets
+	bool key_rx_odd_active;
+	bool key_tx_odd_active;
+	struct rist_key key_tx_odd; // used for transmitted packets
+	struct rist_key key_rx_odd; // used for received packets
+	bool rolling_over_passphrase;
 	struct eapsrp_ctx *eap_ctx;
 	int eap_authentication_state;
 	uint8_t rist_gre_version;
@@ -544,7 +552,8 @@ struct rist_peer {
 	/* listening mode with @ */
 	bool listening;
 	/* multicast */
-	bool multicast;
+	bool multicast_sender;
+	bool multicast_receiver;
 
 	/* rist ctx */
 	struct rist_sender *sender_ctx;
@@ -577,17 +586,22 @@ struct rist_peer {
 
 	/* Timers */
 	uint32_t rtcp_keepalive_interval;
-	uint64_t keepalive_next_time;
+	uint64_t next_periodic_rtcp;
+	uint64_t next_keepalive_packet;
 	uint64_t session_timeout;
-	uint64_t last_rtcp_received;
+	uint64_t last_pkt_received;
 	uint64_t last_sender_report_time;
 	uint64_t last_sender_report_ts;
 
 	char *url;
 	char cname[RIST_MAX_HOSTNAME];
+	uint8_t mac_addr[6];
 	bool send_first_connection_event;
 
 	uint64_t log_repeat_timer;
+
+	uint8_t data[SIZEOF_GRE_KEEPALIVE];
+
 };
 
 static inline struct rist_common_ctx *rist_struct_get_common(struct rist_ctx *ctx) {
@@ -605,7 +619,7 @@ static inline struct rist_common_ctx *rist_struct_get_common(struct rist_ctx *ct
 RIST_PRIV void rist_receiver_flow_statistics(struct rist_receiver *ctx, struct rist_flow *flow);
 RIST_PRIV void rist_sender_peer_statistics(struct rist_peer *peer);
 RIST_PRIV void rist_delete_flow(struct rist_receiver *ctx, struct rist_flow *f);
-RIST_PRIV void rist_receiver_missing(struct rist_flow *f, struct rist_peer *peer,uint64_t nack_time, uint32_t seq, uint32_t rtt);
+RIST_PRIV void rist_receiver_missing(struct rist_flow *f, struct rist_peer *peer,uint64_t nack_time, uint32_t seq, uint64_t rtt);
 RIST_PRIV int rist_receiver_associate_flow(struct rist_peer *p, uint32_t flow_id);
 RIST_PRIV size_t rist_best_rtt_index(struct rist_flow *f);
 RIST_PRIV struct rist_buffer *rist_new_buffer(struct rist_common_ctx *ctx, const void *buf, size_t len, uint8_t type, uint32_t seq, uint64_t source_time, uint16_t src_port, uint16_t dst_port);
