@@ -1,3 +1,9 @@
+librist (0.2.11+dfsg-2) unstable; urgency=medium
+
+  * Rebuild with LTO enabled (dpkg vendor feature optimize/lto).
+
+ -- tunaichao <tunaichao@uniontech.com>  Thu, 10 Sep 2026 18:59:44 +0800
+
 librist (0.2.11+dfsg-1) unstable; urgency=medium
 
   * Uploading to unstable now that the mbedtls transition has finished
